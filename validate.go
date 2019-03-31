@@ -23,7 +23,7 @@ func init() {
 	}
 }
 
-func defaultPrepareStructFields(arg interface{}) error {
+func defaultValidateStructFields(arg interface{}) error {
 	if arg != nil && reflect.Indirect(reflect.ValueOf(arg)).Kind() == reflect.Struct {
 		return Validator.Struct(arg)
 	}

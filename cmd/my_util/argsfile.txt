@@ -1,11 +1,16 @@
 {
 	"command": ["print-args"],
-	"env": ["BOOL=true"],
+	"env": [
+		"bool=$BOOL",
+		"BOOL=$bool"
+	],
 	"args": [
 		"-filepath=$PWD/main.go",
 		"-map", "has_filter=true,has_env=yes",
 		"-list=1,2",
 		"-map=key=value",
-		"-list=3"
+		"-list=3",
+		"remainder1",
+		"remainder2"
 	]
 }

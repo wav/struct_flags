@@ -14,19 +14,19 @@ func TestFlagValidate(t *testing.T) {
 
 	args := testFlags{}
 
-	require.Error(t, PrepareStructFields(args))
+	require.Error(t, ValidateStructFields(args))
 
 	args = testFlags{
 		File: "validate_test.go",
 	}
 
-	require.NoError(t, PrepareStructFields(args))
+	require.NoError(t, ValidateStructFields(args))
 
 	args = testFlags{
 		File: "validate_test.go.missing",
 	}
 
-	require.Error(t, PrepareStructFields(args))
+	require.Error(t, ValidateStructFields(args))
 
 	type testFlags2 struct {
 		File string `flag:"out" validate:"file=absolute"`
@@ -34,13 +34,13 @@ func TestFlagValidate(t *testing.T) {
 
 	args2 := testFlags2{}
 
-	require.NoError(t, PrepareStructFields(args2))
+	require.NoError(t, ValidateStructFields(args2))
 
 	args2 = testFlags2{
 		File: "validate_test.go",
 	}
 
-	require.Error(t, PrepareStructFields(args2))
+	require.Error(t, ValidateStructFields(args2))
 
 	abs, _ := filepath.Abs("validate_test.go")
 
@@ -48,6 +48,6 @@ func TestFlagValidate(t *testing.T) {
 		File: abs,
 	}
 
-	require.NoError(t, PrepareStructFields(args2))
+	require.NoError(t, ValidateStructFields(args2))
 
 }

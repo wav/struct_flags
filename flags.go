@@ -26,9 +26,6 @@ type Command interface {
 	ICommand
 	// DefaultFlags is a prefilled instance of a struct type that flag parsing will populate
 	DefaultFlags() (flags interface{})
-	// Prepare validates and does any necessary transformations before Execute is called.
-	// [flags] must be of the same type returned by DefaultFlags
-	PrepareFlags(flags interface{}) error
 	Execute(ctx context.Context, flags interface{}) error
 }
 
@@ -43,62 +40,35 @@ type ArgFile struct {
 	Env     []string `json:"env"`
 }
 
-func NewCommand(name, usage string, defaultFlags, prepareFlags, execute interface{}) Command {
+func NewCommand(name string, defaultFlagsStruct interface{}, usage string, executeFn interface{}) Command {
 	if name == "" {
 		panic("'name' name must be provided")
 	}
-	if execute == nil {
-		panic("'execute' must be provided")
+	if executeFn == nil {
+		panic("'executeFn' must be provided")
 	}
 	c := command{
 		name:         name,
 		usage:        usage,
-		defaultFlags: defaultFlags,
-		prepareFlags: PrepareStructFields,
-	}
-
-	// by default do nothing
-	if c.prepareFlags == nil {
-		c.prepareFlags = func(a interface{}) error {
-			return nil
-		}
-	}
-
-	// Prepare
-
-	if prepareFlags != nil {
-		prepareT := reflect.TypeOf(prepareFlags)
-		if prepareT.Kind() != reflect.Func || prepareT.NumIn() != 1 || prepareT.NumOut() != 1 || !prepareT.Out(0).Implements(errorType) || prepareT.In(0) != reflect.TypeOf(defaultFlags) {
-			s := "nil"
-			if defaultFlags != nil {
-				s = reflect.TypeOf(defaultFlags).String()
-			}
-			panic(fmt.Errorf("prepareFlags is not a function of type 'func (%s) error'", s))
-		}
-		preparer := c.prepareFlags
-		c.prepareFlags = func(arg interface{}) error {
-			if err := preparer(arg); err != nil {
-				return err
-			}
-			if err := reflect.ValueOf(prepareFlags).Call([]reflect.Value{reflect.ValueOf(arg)})[0].Interface(); err != nil {
-				return err.(error)
-			}
-			return nil
-		}
+		defaultFlags: defaultFlagsStruct,
 	}
 
 	// Execute
-
-	execT := reflect.TypeOf(execute)
-	if execT.Kind() != reflect.Func || execT.NumIn() != 2 || execT.NumOut() != 1 || !execT.Out(0).Implements(errorType) || !execT.In(0).Implements(contextType) || execT.In(1) != reflect.TypeOf(defaultFlags) {
+	execT := reflect.TypeOf(executeFn)
+	if execT.Kind() != reflect.Func || execT.NumIn() != 2 || execT.NumOut() != 1 || !execT.Out(0).Implements(errorType) || !execT.In(0).Implements(contextType) || execT.In(1) != reflect.TypeOf(c.defaultFlags) {
 		s := "nil"
-		if defaultFlags != nil {
-			s = reflect.TypeOf(defaultFlags).String()
+		if c.defaultFlags != nil {
+			s = reflect.TypeOf(c.defaultFlags).String()
 		}
-		panic(fmt.Errorf("execute, for command '%s', is not a function of type 'func (context.Context, %s) error'", name, s))
+		panic(fmt.Errorf("'executeFn' for command '%s', is not a function of type 'func (context.Context, %s) error'", name, s))
 	}
 	c.execute = func(ctx context.Context, arg interface{}) error {
-		if err := reflect.ValueOf(execute).Call([]reflect.Value{reflect.ValueOf(ctx), reflect.ValueOf(arg)})[0].Interface(); err != nil {
+		if ValidateStructFields != nil {
+			if err := ValidateStructFields(arg); err != nil {
+				return err
+			}
+		}
+		if err := reflect.ValueOf(executeFn).Call([]reflect.Value{reflect.ValueOf(ctx), reflect.ValueOf(arg)})[0].Interface(); err != nil {
 			return err.(error)
 		}
 		return nil
@@ -107,14 +77,14 @@ func NewCommand(name, usage string, defaultFlags, prepareFlags, execute interfac
 }
 
 func NewCommandGroup(name, usage string, commands ...ICommand) CommandGroup {
-	return &commandGroup{
+	return commandGroup{
 		name:     name,
 		usage:    usage,
 		commands: commands,
 	}
 }
 
-var PrepareStructFields = defaultPrepareStructFields
+var ValidateStructFields = defaultValidateStructFields
 
 type usage struct {
 	Description string
@@ -124,38 +94,50 @@ func (u usage) Error() string {
 	return u.Description
 }
 
-var parentCommandsKey = &struct{}{}
+type contextKey struct {
+	value int
+}
+
+var parentCommandsKey = contextKey{value: 1}
 
 func getParentCommands(ctx context.Context) []string {
 	value := ctx.Value(parentCommandsKey)
 	if value == nil {
 		return nil
 	}
-	if parents, ok := value.([]string); ok {
-		return parents
-	}
-	return nil
+	return value.([]string)
 }
 
 func withParentCommands(ctx context.Context, parents []string) context.Context {
 	return context.WithValue(ctx, parentCommandsKey, parents)
 }
 
-var argFileKey = &struct{}{}
+var argFileKey = contextKey{value: 2}
 
 func getArgFile(ctx context.Context) *ArgFile {
 	value := ctx.Value(argFileKey)
 	if value == nil {
 		return nil
 	}
-	if argFile, ok := value.(*ArgFile); ok {
-		return argFile
-	}
-	return nil
+	return value.(*ArgFile)
 }
 
 func withArgFile(ctx context.Context, argFile *ArgFile) context.Context {
 	return context.WithValue(ctx, argFileKey, argFile)
+}
+
+var remainingArgsKey = contextKey{value: 3}
+
+func GetRemainingArgs(ctx context.Context) []string {
+	value := ctx.Value(remainingArgsKey)
+	if value == nil {
+		return nil
+	}
+	return value.([]string)
+}
+
+func withRemainingArgs(ctx context.Context, remaining []string) context.Context {
+	return context.WithValue(ctx, remainingArgsKey, remaining)
 }
 
 func (cs Commands) Run(ctx context.Context, args []string) error {
@@ -168,31 +150,10 @@ func (cs Commands) Run(ctx context.Context, args []string) error {
 
 	// Argfile requested
 	if strings.HasPrefix(currentCommandName, "@") && getArgFile(ctx) == nil {
-		data, err := ioutil.ReadFile(currentCommandName[1:])
+		mergedArgs, ctx, err := mergeArgsFileArgs(currentCommandName[1:], ctx, args)
 		if err != nil {
-			return fmt.Errorf("could not open @argfile, err: %s", err.Error())
+			return err
 		}
-		var argFile ArgFile
-		if err := json.Unmarshal(data, &argFile); err != nil {
-			return fmt.Errorf("could not read @argfile, err: %s", err.Error())
-		}
-		ctx = withParentCommands(ctx, append(parentCommands, argFile.Command...))
-		ctx = withArgFile(ctx, &argFile)
-		for _, env := range argFile.Env {
-			kv := strings.SplitN(env, "=", 2)
-			if err := os.Setenv(kv[0], os.ExpandEnv(kv[1])); err != nil {
-				return fmt.Errorf("failed to apply environment variable %s from @argfile", err.Error())
-			}
-		}
-		var mergedArgs []string
-		mergedArgs = append(mergedArgs, args[:len(parentCommands)+1]...)
-		mergedArgs = append(mergedArgs, argFile.Command...)
-		fileArgs := append([]string{}, argFile.Args...)
-		for i, arg := range fileArgs {
-			fileArgs[i] = os.ExpandEnv(arg)
-		}
-		mergedArgs = append(mergedArgs, fileArgs...)
-		mergedArgs = append(mergedArgs, args[len(parentCommands)+2:]...)
 		return cs.Run(ctx, mergedArgs)
 	}
 
@@ -212,14 +173,15 @@ func (cs Commands) Run(ctx context.Context, args []string) error {
 		return cs.usage(args)
 	}
 	flags := command.DefaultFlags()
-	arg, err := parseCommandFlags(flags, args[minArgs:])
+	remaining, arg, err := parseCommandFlags(flags, args[minArgs:])
 	if err != nil {
 		return err
 	}
-	if err := command.PrepareFlags(arg); err != nil {
+
+	if err := command.Execute(withRemainingArgs(ctx, remaining), arg); err != nil {
 		if len(args) == minArgs {
 			// the default flags values fail
-			_, err := parseCommandFlags(flags, []string{"--help"})
+			_, _, err := parseCommandFlags(flags, []string{"--help"})
 			return err
 		}
 		switch verr := err.(type) {
@@ -236,19 +198,56 @@ func (cs Commands) Run(ctx context.Context, args []string) error {
 				if ferr.Param() != "" {
 					rule += "=" + ferr.Param()
 				}
-				// Write a similar message to 'flags', eg. 'flag provided but not defined: -a'
-				message := fmt.Sprintf("flag provided but it does not satisfy the rule '%s': -%s %s", rule, flagName, fmt.Sprint(ferr.Value()))
+				// Write a similar message to 'flags', eg. 'invalid value "bad" for flag -int: parse error'
+				message := fmt.Sprintf("invalid value \"%s\" for flag -%s: validation failed for rule '%s'", fmt.Sprint(ferr.Value()), flagName, rule)
 				errs = append(errs, message)
 			}
-			return errors.New(strings.Join(errs, "\n"))
+			// print help
+			err = errors.New(strings.Join(errs, "\n"))
+			println(err.Error())
+			_, _, _ = parseCommandFlags(flags, []string{"--help"})
+			return err
 		}
 		return err
 	}
-	return command.Execute(ctx, arg)
+	return nil
+}
+
+func mergeArgsFileArgs(filename string, ctx context.Context, args []string) ([]string, context.Context, error) {
+	data, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, ctx, fmt.Errorf("could not open @argfile, err: %s", err.Error())
+	}
+	var argFile ArgFile
+	if err := json.Unmarshal(data, &argFile); err != nil {
+		return nil, ctx, fmt.Errorf("could not read @argfile, err: %s", err.Error())
+	}
+	ctx = withArgFile(ctx, &argFile)
+	for _, env := range argFile.Env {
+		kv := strings.SplitN(env, "=", 2)
+		if err := os.Setenv(kv[0], os.ExpandEnv(kv[1])); err != nil {
+			return nil, ctx, fmt.Errorf("failed to apply environment variable %s from @argfile", err.Error())
+		}
+	}
+
+	var mergedArgs []string
+	parentCommands := getParentCommands(ctx)
+	// "<exe> command* @argsfile.txt args..." to "<exe> command*"
+	mergedArgs = append(mergedArgs, args[:len(parentCommands)+1]...)
+	// "<exe> command*"                       to "<exe> command* argFileCommands... argFileArgs..."
+	mergedArgs = append(mergedArgs, argFile.Command...)
+	fileArgs := append([]string{}, argFile.Args...)
+	for i, arg := range fileArgs {
+		fileArgs[i] = os.ExpandEnv(arg)
+	}
+	mergedArgs = append(mergedArgs, fileArgs...)
+	// "<exe> command* argFileCommands... argFileArgs... argsAfterArgsFileTxt..."
+	mergedArgs = append(mergedArgs, args[len(parentCommands)+2:]...)
+	return mergedArgs, ctx, nil
 }
 
 func (cs Commands) usage(args []string) usage {
-	desc := "usage: " + args[0] + " [command] [args]\n\n"
+	desc := "Usage of " + args[0] + " [command]:\n"
 	nameWidth := 0
 	for _, c := range cs {
 		if c.Name() == "" {
@@ -269,11 +268,12 @@ func (cs Commands) usage(args []string) usage {
 		}
 		desc += "\n"
 	}
+	desc += "flag: help requested"
 	return usage{Description: desc}
 }
 
 // commandArgs = args[2:]
-func parseCommandFlags(commandFlags interface{}, commandArgs []string) (updatedFlags interface{}, err error) {
+func parseCommandFlags(commandFlags interface{}, commandArgs []string) (remaining []string, updatedFlags interface{}, err error) {
 	if commandFlags != nil {
 		ft := reflect.TypeOf(commandFlags)
 		if ft.Kind() == reflect.Ptr {
@@ -286,11 +286,12 @@ func parseCommandFlags(commandFlags interface{}, commandArgs []string) (updatedF
 			case reflect.Slice:
 				updatedFlags = commandArgs
 			default:
-				_, err := fs.UnmarshalFlags(commandArgs, v.Interface())
-				updatedFlags = reflect.Indirect(v).Interface()
-				if err != nil {
-					return err
+				remaining_, unmarshalErr := fs.UnmarshalFlags(commandArgs, v.Interface())
+				if unmarshalErr != nil {
+					return unmarshalErr
 				}
+				updatedFlags = reflect.Indirect(v).Interface()
+				remaining = remaining_
 			}
 			return nil
 		})
@@ -317,9 +318,9 @@ func getStructFieldForError(e validator.FieldError, v interface{}) (reflect.Stru
 	for i, name := range path {
 		last := i == len(path)-1
 		if last {
-			return cursor.Type().FieldByName(name)
+			return reflect.Indirect(cursor).Type().FieldByName(name)
 		} else {
-			cursor = cursor.FieldByName(name)
+			cursor = reflect.Indirect(cursor).FieldByName(name)
 		}
 	}
 	return reflect.StructField{}, false
@@ -365,17 +366,22 @@ type flagSet struct {
 }
 
 type flagInfo struct {
-	name  string
-	usage string
-	env   string
-	set   func()
+	name     string
+	usage    string
+	env      string
+	validate string
+	set      func()
 }
 
 func (fi flagInfo) fullUsage() string {
-	if fi.env == "" {
-		return fi.usage
+	usage := fi.usage
+	if fi.env != "" {
+		usage += " (env \"" + fi.env + "\")"
 	}
-	return fi.usage + " (env \"" + fi.env + "\")"
+	if fi.validate != "" {
+		usage += " (" + fi.validate + ")"
+	}
+	return usage
 }
 
 func (fi flagInfo) readEnv(valuePtr interface{}) bool {
@@ -417,9 +423,10 @@ func readFlagInfo(t reflect.Type, prefix string, i int) (*flagInfo, bool) {
 		return nil, false
 	}
 	info := flagInfo{
-		name:  prefix + flagTag[0],
-		usage: tag.Get("usage"),
-		env:   tag.Get("env"),
+		name:     prefix + flagTag[0],
+		usage:    tag.Get("usage"),
+		env:      tag.Get("env"),
+		validate: tag.Get("validate"),
 	}
 	return &info, true
 }
@@ -568,7 +575,6 @@ type command struct {
 	name         string
 	usage        string
 	defaultFlags interface{}
-	prepareFlags func(interface{}) error
 	execute      func(context.Context, interface{}) error
 }
 
@@ -582,10 +588,6 @@ func (c command) Usage() string {
 
 func (c command) DefaultFlags() interface{} {
 	return c.defaultFlags
-}
-
-func (c command) PrepareFlags(arg interface{}) error {
-	return c.prepareFlags(arg)
 }
 
 func (c command) Execute(ctx context.Context, arg interface{}) error {

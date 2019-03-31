@@ -11,11 +11,10 @@ Yet another flags package. This one defines flags using go's "flags" using struc
 - Structs can be nested and optionally squashed
 - `my_util @argfile.txt --string=1` will read flags from an *ArgFile* (a json object)
 - *ArgFile* supports variable replacement. eg. for `a=1`, `--flag=$a` will become `--flag=1`
-- Subcommands
 
 # Missing
 
-- Positional Arguments. If ever implemented, they will follow flags.
+- Positional Arguments, if ever implemented, will follow flags.
 
 # Order of arguments
 
@@ -28,10 +27,28 @@ package main
 
 import (
 	"context"
-	"github/wav/struct_flags"
-	"os"
 	"encoding/json"
+	"github.com/wav/struct_flags"
+	"os"
+	"strings"
 )
+
+// commands for this package
+var commands struct_flags.Commands
+
+// main for this package
+func main() {
+	if err := commands.Run(context.TODO(), os.Args); err != nil {
+		println(err.Error())
+		os.Exit(1)
+	}
+}
+
+// init is used to register commands per file
+func init() {
+	c := struct_flags.NewCommand("print-args", Flags{},"print the provided arguments if they validate ok", execute)
+	commands = append(commands, c, struct_flags.NewCommandGroup("more", ""))
+}
 
 type Object struct {
 	String1 string `flag:"string1" usage:"string1 if squashed, otherwise nested.string1"`
@@ -40,37 +57,25 @@ type Object struct {
 
 type Flags struct {
 	String        string            `flag:"string" usage:"string"`
-	Filepath      string            `flag:"filepath" usage:"filepath" validate:"required,file=exists,file=absolute"`
+	Filepath      string            `flag:"filepath" usage:"filepath" validate:"required,file=absolute,file=exists"`
 	Int           int               `flag:"int" usage:"int"`
 	Bool          bool              `flag:"bool" env:"BOOL" usage:"bool"`
 	List          []string          `flag:"list" usage:"list"`
 	NestedFlags   Object            `flag:"nested" usage:"nested"`
 	SquashedFlags Object            `flag:"-" usage:"nested"`
 	Map           map[string]string `flag:"map" usage:"map"`
+
+	// Globals `flag:"-" usage:"global flags through composition"`
 }
 
-var commands struct_flags.Commands
-
-func init() {
-	defaultFlags := Flags{}
-	c := struct_flags.NewCommand("print-args", "print the provided arguments if they validate ok", defaultFlags, nil, execute)
-	commands = append(commands, c)
-}
-
-func execute(_ context.Context, flags Flags) error {
+func execute(ctx context.Context, flags Flags) error {
 	data, err := json.MarshalIndent(flags, "", "  ")
 	if err != nil {
 		return err
 	}
-	println(string(data))
+	println("flags:", string(data))
+	println("remaining args:", strings.Join(struct_flags.GetRemainingArgs(ctx), " "))
 	return nil
-}
-
-func main() {
-	if err := commands.Run(context.TODO(), os.Args); err != nil {
-		println(err.Error())
-		os.Exit(1)
-	}
 }
 
 ```
@@ -82,19 +87,20 @@ bash:my_util$ ./my_util
 usage: ./my_util [command] [args]
 
   print-args      print the provided arguments if they validate ok
+  more
 ```
 
 ```bash
 bash:my_util$ ./my_util print-args -filepath=
-flag provided but it does not satisfy the rule 'required': -filepath
+invalid value "" for flag -filepath: validation failed for rule 'required'
 ```
 
 ```bash
-bash:my_util$ BOOL=true ./my_util print-args -filepath=$(pwd)/main.go -map has_filter=true,has_env=yes -list=1,2 -map=key=value -list=3
+bash:my_util$ BOOL=true ./my_util print-args -filepath=$(pwd)/main.go -map has_filter=true,has_env=yes -list=1,2 -map=key=value -list=3 remainder1 remainder2 --remainder3
 
-{
+flags: {
   "String": "",
-  "Filepath": "/go/src/github.com/wav/struct_flags/cmd/my_util/main.go",
+  "Filepath": "/Users/wassim/Repositories/src/git.wav.im/wav/struct_flags/cmd/my_util/main.go",
   "Int": 0,
   "Bool": true,
   "List": [
@@ -116,7 +122,7 @@ bash:my_util$ BOOL=true ./my_util print-args -filepath=$(pwd)/main.go -map has_f
     "key": "value"
   }
 }
-
+remaining args: remainder1 remainder2 --remainder3
 ```
 
 The above command can also be put in an *ArgsFile*
@@ -124,13 +130,19 @@ The above command can also be put in an *ArgsFile*
 ```argsfile.txt
 {
 	"command": ["print-args"],
-	"env": ["BOOL=true"],
+	"env": [
+		"bool=$BOOL",
+		"BOOL=$bool"
+	],
 	"args": [
 		"-filepath=$PWD/main.go",
 		"-map", "has_filter=true,has_env=yes",
 		"-list=1,2",
 		"-map=key=value",
-		"-list=3"
+		"-list=3",
+		"remainder1",
+		"remainder2",
+		"--remainder3"
 	]
 }
 ```

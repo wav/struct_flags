@@ -91,11 +91,11 @@ func TestFlagSetUsage(t *testing.T) {
 		String string `flag:"string" validate:"required"`
 	}
 
-	prepare := NewCommand("cmd", "", ex1{}, nil, func(_ context.Context, flags ex1) error {
+	command := NewCommand("cmd", ex1{}, "", func(_ context.Context, flags ex1) error {
 		return nil
-	}).PrepareFlags
+	})
 
-	err := prepare(ex1{})
+	err := command.Execute(context.TODO(), ex1{})
 	verr, ok := err.(validator.ValidationErrors)
 	require.True(t, ok)
 	f, ok := getStructFieldForError(verr[0], ex1{})
@@ -111,12 +111,12 @@ func TestNestedCommand(t *testing.T) {
 
 	value := ""
 
-	command := NewCommand("top", "", cmd{}, nil, func(_ context.Context, flags cmd) error {
+	command := NewCommand("top", cmd{}, "", func(_ context.Context, flags cmd) error {
 		value = "top " + flags.String
 		return nil
 	})
 
-	subCommand := NewCommand("cmd", "", cmd{}, nil, func(_ context.Context, flags cmd) error {
+	subCommand := NewCommand("cmd", cmd{}, "", func(_ context.Context, flags cmd) error {
 		value = "sub " + flags.String
 		return nil
 	})
@@ -144,7 +144,7 @@ func TestArgFile(t *testing.T) {
 	var argFile *ArgFile
 	var collectedFlags cmd
 
-	command := NewCommand("cmd", "", cmd{}, nil, func(ctx context.Context, flags cmd) error {
+	command := NewCommand("cmd", cmd{}, "", func(ctx context.Context, flags cmd) error {
 		argFile = getArgFile(ctx)
 		collectedFlags = flags
 		return nil
