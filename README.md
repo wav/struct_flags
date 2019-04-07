@@ -11,14 +11,11 @@ Yet another flags package. This one defines flags using go's "flags" using struc
 - Structs can be nested and optionally squashed
 - `my_util @argfile.txt --string=1` will read flags from an *ArgFile* (a json object)
 - *ArgFile* supports variable replacement. eg. for `a=1`, `--flag=$a` will become `--flag=1`
-
-# Missing
-
-- Positional Arguments, if ever implemented, will follow flags.
+- Positional Arguments: Given the command spec, `command [arg1]`, use the tag `flag:"[arg1]"`
 
 # Order of arguments
 
-`my_util [command] [flags] [args]`
+`my_util [command] [flags] [positional args] [remaining args]`
 
 # Sample
 

@@ -24,6 +24,7 @@ type ICommand interface {
 
 type Command interface {
 	ICommand
+	PositionalArgs() []string
 	// DefaultFlags is a prefilled instance of a struct type that flag parsing will populate
 	DefaultFlags() (flags interface{})
 	Execute(ctx context.Context, flags interface{}) error
@@ -173,17 +174,12 @@ func (cs Commands) Run(ctx context.Context, args []string) error {
 		return cs.usage(args)
 	}
 	flags := command.DefaultFlags()
-	remaining, arg, err := parseCommandFlags(flags, args[minArgs:])
+	remaining, arg, err := parseCommandFlags(flags, command.PositionalArgs(), args[minArgs:])
 	if err != nil {
 		return err
 	}
 
 	if err := command.Execute(withRemainingArgs(ctx, remaining), arg); err != nil {
-		if len(args) == minArgs {
-			// the default flags values fail
-			_, _, err := parseCommandFlags(flags, []string{"--help"})
-			return err
-		}
 		switch verr := err.(type) {
 		case validator.ValidationErrors:
 			var errs []string
@@ -198,14 +194,18 @@ func (cs Commands) Run(ctx context.Context, args []string) error {
 				if ferr.Param() != "" {
 					rule += "=" + ferr.Param()
 				}
+				var message string
 				// Write a similar message to 'flags', eg. 'invalid value "bad" for flag -int: parse error'
-				message := fmt.Sprintf("invalid value \"%s\" for flag -%s: validation failed for rule '%s'", fmt.Sprint(ferr.Value()), flagName, rule)
+				if argName := readPositionalArg(flagName); argName != "" {
+					message = fmt.Sprintf("invalid value \"%s\" for argument [%s]: validation failed for rule '%s'", fmt.Sprint(ferr.Value()), argName, rule)
+				} else {
+					message = fmt.Sprintf("invalid value \"%s\" for flag -%s: validation failed for rule '%s'", fmt.Sprint(ferr.Value()), flagName, rule)
+				}
 				errs = append(errs, message)
 			}
-			// print help
 			err = errors.New(strings.Join(errs, "\n"))
-			println(err.Error())
-			_, _, _ = parseCommandFlags(flags, []string{"--help"})
+			// TODO implement flags.PrintUsage()
+			_, _, _ = parseCommandFlags(flags, command.PositionalArgs(), []string{"--help"})
 			return err
 		}
 		return err
@@ -273,14 +273,18 @@ func (cs Commands) usage(args []string) usage {
 }
 
 // commandArgs = args[2:]
-func parseCommandFlags(commandFlags interface{}, commandArgs []string) (remaining []string, updatedFlags interface{}, err error) {
+func parseCommandFlags(commandFlags interface{}, positionalArgs []string, commandArgs []string) (remaining []string, updatedFlags interface{}, err error) {
 	if commandFlags != nil {
 		ft := reflect.TypeOf(commandFlags)
 		if ft.Kind() == reflect.Ptr {
 			ft = ft.Elem()
 		}
 		v := reflect.New(ft)
-		fs := NewFlagSet(commandFlags)
+		name := os.Args[0]
+		for _, posArg := range positionalArgs {
+			name += " [" + posArg + "]"
+		}
+		fs := NewFlagSet(name, commandFlags)
 		err = handleError(func() error {
 			switch v.Elem().Kind() {
 			case reflect.Slice:
@@ -290,6 +294,7 @@ func parseCommandFlags(commandFlags interface{}, commandArgs []string) (remainin
 				if unmarshalErr != nil {
 					return unmarshalErr
 				}
+				remaining_ = fillPositionalArgs(positionalArgs, v, remaining_)
 				updatedFlags = reflect.Indirect(v).Interface()
 				remaining = remaining_
 			}
@@ -351,17 +356,19 @@ type FlagSet interface {
 	UnmarshalFlags(argsAndFlags []string, a interface{}) (args []string, err error)
 }
 
-func NewFlagSet(defaults interface{}) FlagSet {
+func NewFlagSet(name string, defaults interface{}) FlagSet {
 	v := reflect.Indirect(reflect.ValueOf(defaults))
 	if v.Kind() != reflect.Struct && v.Kind() != reflect.Slice {
 		panic("expected struct or slice type, got: " + v.Type().String())
 	}
 	return flagSet{
+		name:     name,
 		defaults: v.Interface(),
 	}
 }
 
 type flagSet struct {
+	name     string
 	defaults interface{}
 }
 
@@ -432,7 +439,11 @@ func readFlagInfo(t reflect.Type, prefix string, i int) (*flagInfo, bool) {
 }
 
 func (s flagSet) UnmarshalFlags(args []string, a interface{}) ([]string, error) {
-	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	name := os.Args[0]
+	if s.name != "" {
+		name = s.name
+	}
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	defaults := reflect.ValueOf(s.defaults)
 	focus := reflect.ValueOf(a)
 	var flags []flagInfo
@@ -449,6 +460,49 @@ func (s flagSet) UnmarshalFlags(args []string, a interface{}) ([]string, error) 
 	return fs.Args(), nil
 }
 
+func fillPositionalArgs(positionalArgs []string, value reflect.Value, argsAfterFlags []string) []string {
+	if value.Kind() != reflect.Ptr || value.Elem().Kind() != reflect.Struct {
+		panic("expected *struct{}, got: " + value.String())
+	}
+	value = value.Elem()
+	pos := 0
+	done := func() bool {
+		if pos > len(positionalArgs)-1 || pos > len(argsAfterFlags)-1 {
+			return true
+		}
+		return false
+	}
+Args:
+	for _, argName := range positionalArgs {
+		if done() {
+			break
+		}
+		for i := 0; i < value.NumField(); i++ {
+			info, ok := readFlagInfo(value.Type(), "", i)
+			if !ok || readPositionalArg(info.name) != argName {
+				continue
+			}
+			fieldValue := value.Field(i)
+			switch fieldValue.Kind() {
+			case reflect.String:
+				s := argsAfterFlags[pos]
+				fieldValue.SetString(s)
+				info.set = func() {
+					fieldValue.SetString(s)
+				}
+				pos++
+				continue Args
+			case reflect.Slice:
+				arr := append([]string{}, argsAfterFlags[pos:]...)
+				fieldValue.Set(reflect.ValueOf(arr))
+				return []string{}
+			}
+		}
+		break
+	}
+	return argsAfterFlags[pos:]
+}
+
 func collectStructFlags(fs *flag.FlagSet, collected []flagInfo, prefix string, defaults, focus reflect.Value, seen map[reflect.Type]*struct{}) []flagInfo {
 	if focus.Kind() != reflect.Ptr || focus.Elem().Type() != defaults.Type() {
 		panic("expected *" + defaults.String() + ", got: " + focus.String())
@@ -459,7 +513,7 @@ func collectStructFlags(fs *flag.FlagSet, collected []flagInfo, prefix string, d
 	seen[focus.Type()] = nil
 	for i := 0; i < defaults.NumField(); i++ {
 		info, ok := readFlagInfo(defaults.Type(), prefix, i)
-		if !ok {
+		if !ok || readPositionalArg(info.name) == "" {
 			continue
 		}
 		fieldValue := focus.Elem().Field(i)
@@ -579,7 +633,27 @@ type command struct {
 }
 
 func (c command) Name() string {
-	return c.name
+	parts := strings.SplitN(strings.Replace(c.name, "  ", " ", -1), " ", 2)
+	return parts[0]
+}
+
+func readPositionalArg(arg string) string {
+	if len(arg) > 2 && arg[0] == '[' && arg[len(arg)-1] == ']' {
+		return arg[1 : len(arg)-1]
+	}
+	return ""
+}
+
+func (c command) PositionalArgs() (args []string) {
+	parts := strings.Split(strings.Replace(c.name, "  ", " ", -1), " ")
+	for _, arg := range parts[1:] {
+		if arg := readPositionalArg(arg); arg != "" {
+			args = append(args, arg)
+		} else {
+			panic("invalid positional args: " + c.name)
+		}
+	}
+	return
 }
 
 func (c command) Usage() string {

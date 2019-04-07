@@ -27,41 +27,41 @@ func TestFlagSet_UnmarshalFlags(t *testing.T) {
 		Map         map[string]string `flag:"map" usage:"map"`
 	}
 
-	fs := NewFlagSet(&Flags{})
+	fs := NewFlagSet("", &Flags{})
 	flags := Flags{}
 	args, err := fs.UnmarshalFlags([]string{}, &flags)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{}, args)
 
-	fs = NewFlagSet(&Flags{String: "default"})
+	fs = NewFlagSet("", &Flags{String: "default"})
 	flags = Flags{}
 	args, err = fs.UnmarshalFlags([]string{}, &flags)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{}, args)
 	assert.Equal(t, "default", flags.String)
 
-	fs = NewFlagSet(&Flags{String: "default"})
+	fs = NewFlagSet("", &Flags{String: "default"})
 	flags = Flags{}
 	args, err = fs.UnmarshalFlags([]string{"--string=test"}, &flags)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{}, args)
 	assert.Equal(t, "test", flags.String)
 
-	fs = NewFlagSet(&Flags{Bool: true})
+	fs = NewFlagSet("", &Flags{Bool: true})
 	flags = Flags{}
 	args, err = fs.UnmarshalFlags([]string{"--bool=true"}, &flags)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{}, args)
 	assert.Equal(t, true, flags.Bool)
 
-	fs = NewFlagSet(&Flags{Int: 2})
+	fs = NewFlagSet("", &Flags{Int: 2})
 	flags = Flags{}
 	args, err = fs.UnmarshalFlags([]string{"--int=1", "arg1", "arg2"}, &flags)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"arg1", "arg2"}, args)
 	assert.Equal(t, 1, flags.Int)
 
-	fs = NewFlagSet(&Flags{Int: 2, NestedFlags: Object{
+	fs = NewFlagSet("", &Flags{Int: 2, NestedFlags: Object{
 		String1: "default",
 	}})
 	flags = Flags{}
@@ -76,7 +76,7 @@ func TestFlagSet_UnmarshalFlags(t *testing.T) {
 
 	require.NoError(t, os.Setenv("BOOL", "true"))
 
-	fs = NewFlagSet(&Flags{})
+	fs = NewFlagSet("", &Flags{})
 	flags = Flags{}
 	args, err = fs.UnmarshalFlags([]string{}, &flags)
 	assert.NoError(t, err)
@@ -130,6 +130,30 @@ func TestNestedCommand(t *testing.T) {
 	require.NoError(t, commands.Run(context.TODO(), []string{"<exe>", "has_sub", "cmd", "--string=v"}))
 
 	require.Equal(t, "sub v", value)
+
+}
+
+func TestCommand_PositionalArgs(t *testing.T) {
+
+	type cmd struct {
+		String  string   `flag:"[string]" validate:"required"`
+		Strings []string `flag:"[strings]" validate:"required"`
+	}
+
+	var result cmd
+
+	command := NewCommand("cmd [string] [strings]", cmd{}, "", func(_ context.Context, flags cmd) error {
+		result = flags
+		return nil
+	})
+
+	commands := Commands{command}
+
+	require.NoError(t, commands.Run(context.TODO(), []string{"<exe>", "cmd", "value", "remaining1", "remaining2", "-remaining3"}))
+
+	require.Equal(t, "value", result.String)
+
+	require.Equal(t, []string{"remaining1", "remaining2", "-remaining3"}, result.Strings)
 
 }
 
