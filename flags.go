@@ -1,11 +1,11 @@
 package struct_flags
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"golang.org/x/net/context"
 	"gopkg.in/go-playground/validator.v9"
 	"io/ioutil"
 	"os"
@@ -513,7 +513,7 @@ func collectStructFlags(fs *flag.FlagSet, collected []flagInfo, prefix string, d
 	seen[focus.Type()] = nil
 	for i := 0; i < defaults.NumField(); i++ {
 		info, ok := readFlagInfo(defaults.Type(), prefix, i)
-		if !ok || readPositionalArg(info.name) == "" {
+		if !ok && readPositionalArg(info.name) == "" {
 			continue
 		}
 		fieldValue := focus.Elem().Field(i)
